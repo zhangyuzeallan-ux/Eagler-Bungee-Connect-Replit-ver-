@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "EaglerCraft Bungee"
+version = "1.0.0"
+id = "artifacts/bungee-ui"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 25996
+
+[services.development]
+run = "pnpm --filter @workspace/bungee-ui run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/bungee-ui", "run", "build" ]
+publicDir = "artifacts/bungee-ui/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "25996"
+BASE_PATH = "/"
