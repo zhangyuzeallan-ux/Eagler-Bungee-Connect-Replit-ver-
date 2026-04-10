@@ -63,6 +63,15 @@ function createBungeeProxy(
     );
 
     tcpSocket.on("data", (data: Buffer) => {
+      logger.info(
+        {
+          clientIp,
+          byteLength: data.byteLength,
+          hexPreview: data.slice(0, 32).toString("hex"),
+          textPreview: data.slice(0, 64).toString("utf8").replace(/[^\x20-\x7e]/g, "?"),
+        },
+        "MC→WS data",
+      );
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(data);
       }
@@ -83,16 +92,25 @@ function createBungeeProxy(
     });
 
     ws.on("message", (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
+      const buf = Buffer.isBuffer(data)
+        ? data
+        : data instanceof ArrayBuffer
+          ? Buffer.from(data)
+          : Buffer.concat(data as Buffer[]);
+
+      logger.info(
+        {
+          clientIp,
+          isBinary,
+          byteLength: buf.byteLength,
+          hexPreview: buf.slice(0, 32).toString("hex"),
+          textPreview: buf.slice(0, 64).toString("utf8").replace(/[^\x20-\x7e]/g, "?"),
+        },
+        "WS→MC data",
+      );
+
       if (!tcpSocket.destroyed) {
-        if (Buffer.isBuffer(data)) {
-          tcpSocket.write(data);
-        } else if (data instanceof ArrayBuffer) {
-          tcpSocket.write(Buffer.from(data));
-        } else if (Array.isArray(data)) {
-          for (const chunk of data) {
-            tcpSocket.write(chunk);
-          }
-        }
+        tcpSocket.write(buf);
       }
     });
 
