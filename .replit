@@ -28,6 +28,6 @@ timeoutMs = 20000
 [userenv]
 
 [userenv.shared]
-WS_PATH = "/eagler"
+WS_PATH = "/api/eagler"
 MC_PORT = "16027"
 MC_HOST = "INTHESKY67.aternos.me"

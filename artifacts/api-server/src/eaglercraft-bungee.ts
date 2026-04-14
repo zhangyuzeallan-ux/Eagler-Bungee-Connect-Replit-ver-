@@ -12,7 +12,7 @@ interface BungeeConfig {
 const DEFAULT_CONFIG: BungeeConfig = {
   minecraftHost: process.env["MC_HOST"] || "",
   minecraftPort: Number(process.env["MC_PORT"] || "25565"),
-  wsPath: process.env["WS_PATH"] || "/eagler",
+  wsPath: process.env["WS_PATH"] || "/api/eagler",
 };
 
 function handleClient(

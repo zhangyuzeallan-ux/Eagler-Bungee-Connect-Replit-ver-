@@ -5,7 +5,7 @@ const router: IRouter = Router();
 router.get("/bungee/status", (_req, res) => {
   const mcHost = process.env["MC_HOST"] || "";
   const mcPort = Number(process.env["MC_PORT"] || "25565");
-  const wsPath = process.env["WS_PATH"] || "/eagler";
+  const wsPath = process.env["WS_PATH"] || "/api/eagler";
 
   res.json({
     status: "running",
