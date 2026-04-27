@@ -15,8 +15,6 @@ const DEFAULT_CONFIG: BungeeConfig = {
   wsPath: process.env["WS_PATH"] || "/api/eagler",
 };
 
-// Read a length-prefixed string from a buffer starting at offset
-// Format: [uint16 BE length][utf8 bytes]
 function readLenString(buf: Buffer, offset: number): { value: string; next: number } | null {
   if (buf.length < offset + 2) return null;
   const len = buf.readUInt16BE(offset);
@@ -27,7 +25,6 @@ function readLenString(buf: Buffer, offset: number): { value: string; next: numb
   };
 }
 
-// Write a length-prefixed string into a buffer builder
 function lenString(s: string): Buffer {
   const str = Buffer.from(s, "utf8");
   const out = Buffer.alloc(2 + str.length);
@@ -36,8 +33,17 @@ function lenString(s: string): Buffer {
   return out;
 }
 
+// Build a "server version" hello packet that EaglerXBungee 1.3.x sends
+// Format guess: [0x02][short numVersions][shorts versions...][string brand][string version]
+function buildServerHello(): Buffer {
+  const brand = lenString("EaglerXBungee");
+  const version = lenString("1.3.4");
+  // Type 0x02, num versions 1, version 2 (EaglerXBungee uses v1 or v2)
+  const header = Buffer.from([0x02, 0x00, 0x01, 0x00, 0x02]);
+  return Buffer.concat([header, brand, version]);
+}
+
 function buildMotdResponse(): Buffer {
-  // EaglercraftX 1.8 MOTD response packet (type 0x02)
   const json = JSON.stringify({
     vers: [0, 0],
     cracked: true,
@@ -51,47 +57,6 @@ function buildMotdResponse(): Buffer {
   return Buffer.concat([Buffer.from([0x02]), jsonBuf]);
 }
 
-// Build a VarInt (Minecraft protocol)
-function writeVarInt(value: number): Buffer {
-  const bytes: number[] = [];
-  do {
-    let byte = value & 0x7f;
-    value >>>= 7;
-    if (value !== 0) byte |= 0x80;
-    bytes.push(byte);
-  } while (value !== 0);
-  return Buffer.from(bytes);
-}
-
-// Build Minecraft 1.8 Handshake packet for the proxy to send to the server
-function buildMcHandshake(host: string, port: number, nextState: number): Buffer {
-  const protoVersion = writeVarInt(47); // Minecraft 1.8 protocol
-  const serverAddr = lenString(host);
-  const portBuf = Buffer.alloc(2);
-  portBuf.writeUInt16BE(port, 0);
-  const next = writeVarInt(nextState);
-  const payload = Buffer.concat([protoVersion, serverAddr, portBuf, next]);
-  const packetId = writeVarInt(0x00);
-  const payloadWithId = Buffer.concat([packetId, payload]);
-  const lenPrefix = writeVarInt(payloadWithId.length);
-  return Buffer.concat([lenPrefix, payloadWithId]);
-}
-
-// Build Minecraft 1.8 Status Request packet
-function buildMcStatusRequest(): Buffer {
-  // Packet ID 0x00, no payload
-  return Buffer.from([0x01, 0x00]);
-}
-
-// Build Minecraft 1.8 Login Start packet
-function buildMcLoginStart(username: string): Buffer {
-  const nameBuf = lenString(username);
-  const packetId = writeVarInt(0x00);
-  const payload = Buffer.concat([packetId, nameBuf]);
-  const lenPrefix = writeVarInt(payload.length);
-  return Buffer.concat([lenPrefix, payload]);
-}
-
 function handleClient(
   ws: WebSocket,
   req: http.IncomingMessage,
@@ -101,20 +66,37 @@ function handleClient(
     (req.headers["x-forwarded-for"] as string) ||
     req.socket.remoteAddress ||
     "unknown";
-  const path = req.url || "(unknown)";
 
-  logger.info({ clientIp, path, protocol: ws.protocol }, "EaglerCraft client connected");
+  // LOG EVERYTHING about the upgrade request
+  logger.info(
+    {
+      clientIp,
+      url: req.url,
+      headers: req.headers,
+      protocol: ws.protocol || "(none)",
+    },
+    "[BUNGEE] Client connected — full request info",
+  );
 
   if (!config.minecraftHost) {
-    logger.error("MC_HOST is not set — cannot connect to Minecraft server");
     ws.close(1011, "Proxy misconfigured: MC_HOST not set");
     return;
   }
 
-  let handshakeDone = false;
+  let firstMessageSeen = false;
   let tcpSocket: net.Socket | null = null;
 
-  ws.on("message", (data: Buffer | ArrayBuffer | Buffer[]) => {
+  // Set a timeout: if client sends nothing within 5s, log it
+  const silenceTimer = setTimeout(() => {
+    if (!firstMessageSeen) {
+      logger.warn({ clientIp }, "[BUNGEE] Client connected but sent NO data after 5s");
+    }
+  }, 5000);
+
+  ws.on("message", (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
+    firstMessageSeen = true;
+    clearTimeout(silenceTimer);
+
     const buf = Buffer.isBuffer(data)
       ? data
       : data instanceof ArrayBuffer
@@ -124,103 +106,90 @@ function handleClient(
     logger.info(
       {
         clientIp,
+        isBinary,
         byteLength: buf.byteLength,
-        hexPreview: buf.slice(0, 32).toString("hex"),
-        textPreview: buf.slice(0, 64).toString("utf8").replace(/[^\x20-\x7e]/g, "?"),
+        hexPreview: buf.slice(0, 64).toString("hex"),
+        textPreview: buf.slice(0, 80).toString("utf8").replace(/[^\x20-\x7e]/g, "?"),
       },
-      "WS→proxy data",
+      "[BUNGEE] WS→proxy data",
     );
 
-    // If handshake not done yet, inspect the first packet
-    if (!handshakeDone) {
-      const packetType = buf[0];
-
-      // EaglercraftX MOTD/status ping: type 0x02 + "eaglercraft"
-      if (packetType === 0x02) {
-        const str = readLenString(buf, 1);
-        if (str && str.value === "eaglercraft") {
-          logger.info({ clientIp }, "EaglercraftX MOTD ping — responding with server info");
-          const motd = buildMotdResponse();
-          ws.send(motd);
-          // Keep connection open briefly so client can read the response
-          setTimeout(() => {
-            if (ws.readyState === WebSocket.OPEN) ws.close(1000, "motd");
-          }, 500);
-          return;
-        }
-      }
-
-      // EaglercraftX login handshake: type 0x01 = client hello
-      if (packetType === 0x01) {
-        const str = readLenString(buf, 1);
-        if (str && str.value === "eaglercraft") {
-          logger.info({ clientIp }, "EaglercraftX login handshake detected");
-          // Server hello response: accept the connection
-          // type 0x01 + string "EAGLERXBUNGEE"
-          const serverHello = Buffer.concat([
-            Buffer.from([0x01]),
-            lenString("EAGLERXBUNGEE"),
-          ]);
-          ws.send(serverHello);
-          handshakeDone = true;
-          // Now start forwarding to Minecraft
-          startTcpRelay(ws, config, clientIp, null);
-          return;
-        }
-      }
-
-      // Fallback: treat as raw Minecraft protocol, relay directly
-      logger.info({ clientIp, packetType: packetType.toString(16) }, "Unknown packet type — relaying directly to Minecraft");
-      handshakeDone = true;
-      startTcpRelay(ws, config, clientIp, buf);
+    // If TCP relay already started, just forward
+    if (tcpSocket && !tcpSocket.destroyed) {
+      tcpSocket.write(buf);
       return;
     }
 
-    // After handshake: forward to TCP
-    if (tcpSocket && !tcpSocket.destroyed) {
-      tcpSocket.write(buf);
+    // Inspect first byte to decide what to do
+    const packetType = buf[0];
+
+    // EaglercraftX MOTD/version request: type 0x02 + "eaglercraft"
+    if (packetType === 0x02) {
+      const str = readLenString(buf, 1);
+      if (str && (str.value === "eaglercraft" || str.value === "eaglercraftx")) {
+        logger.info({ clientIp, brand: str.value }, "[BUNGEE] EaglercraftX status/version ping — responding with MOTD");
+        const motd = buildMotdResponse();
+        ws.send(motd);
+        // Keep open briefly so client can read
+        setTimeout(() => {
+          if (ws.readyState === WebSocket.OPEN) ws.close(1000, "motd-done");
+        }, 500);
+        return;
+      }
+      logger.info({ clientIp, parsed: str?.value }, "[BUNGEE] 0x02 packet but not 'eaglercraft' — relaying to TCP");
     }
+
+    // For everything else, start TCP relay and forward
+    logger.info({ clientIp, packetType: packetType?.toString(16) }, "[BUNGEE] Starting TCP relay to Minecraft");
+    startTcpRelay(buf);
   });
 
-  // Store tcp socket reference so post-handshake messages can forward
-  function startTcpRelay(ws: WebSocket, config: BungeeConfig, clientIp: string, firstBuf: Buffer | null) {
+  function startTcpRelay(firstBuf: Buffer | null) {
     const sock = net.createConnection(
       { host: config.minecraftHost, port: config.minecraftPort },
       () => {
-        logger.info({ clientIp, host: config.minecraftHost, port: config.minecraftPort }, "Connected to Minecraft server");
+        logger.info({ clientIp, host: config.minecraftHost, port: config.minecraftPort }, "[BUNGEE] TCP connected to Minecraft");
         if (firstBuf && !sock.destroyed) sock.write(firstBuf);
       },
     );
-
     tcpSocket = sock;
 
     sock.on("data", (data: Buffer) => {
       logger.info(
-        { clientIp, byteLength: data.byteLength, hexPreview: data.slice(0, 32).toString("hex") },
-        "MC→WS data",
+        { clientIp, byteLength: data.byteLength, hexPreview: data.slice(0, 64).toString("hex") },
+        "[BUNGEE] MC→WS data",
       );
       if (ws.readyState === WebSocket.OPEN) ws.send(data);
     });
-
     sock.on("end", () => {
-      logger.info({ clientIp }, "Minecraft server closed connection");
-      if (ws.readyState === WebSocket.OPEN) ws.close(1000, "Minecraft server disconnected");
+      logger.info({ clientIp }, "[BUNGEE] MC closed connection");
+      if (ws.readyState === WebSocket.OPEN) ws.close(1000, "mc-closed");
     });
-
     sock.on("error", (err: Error) => {
-      logger.error({ clientIp, err }, "TCP socket error");
-      if (ws.readyState === WebSocket.OPEN) ws.close(1011, "Connection to Minecraft server failed");
+      logger.error({ clientIp, errMsg: err.message }, "[BUNGEE] TCP error");
+      if (ws.readyState === WebSocket.OPEN) ws.close(1011, "tcp-error");
     });
   }
 
   ws.on("close", (code: number, reason: Buffer) => {
-    logger.info({ clientIp, code, reason: reason.toString() }, "EaglerCraft client disconnected");
+    clearTimeout(silenceTimer);
+    logger.info(
+      { clientIp, code, reason: reason.toString(), receivedAnyData: firstMessageSeen },
+      "[BUNGEE] Client disconnected",
+    );
     if (tcpSocket && !tcpSocket.destroyed) tcpSocket.destroy();
   });
 
   ws.on("error", (err: Error) => {
-    logger.error({ clientIp, err }, "WebSocket client error");
+    logger.error({ clientIp, errMsg: err.message }, "[BUNGEE] WS error");
     if (tcpSocket && !tcpSocket.destroyed) tcpSocket.destroy();
+  });
+
+  ws.on("ping", (data: Buffer) => {
+    logger.info({ clientIp, hex: data.toString("hex") }, "[BUNGEE] WS ping received");
+  });
+  ws.on("pong", (data: Buffer) => {
+    logger.info({ clientIp, hex: data.toString("hex") }, "[BUNGEE] WS pong received");
   });
 }
 
@@ -236,14 +205,31 @@ function createBungeeProxy(
   const wss = new WebSocketServer({
     server,
     path: config.wsPath,
-    handleProtocols: (protocols: Set<string>) => {
-      const first = protocols.values().next().value;
-      return first ? first : false;
+    handleProtocols: (protocols: Set<string>, req: http.IncomingMessage) => {
+      const offered = Array.from(protocols);
+      logger.info({ offered, url: req.url }, "[BUNGEE] handleProtocols called");
+      // Accept whatever subprotocol the client offers; fall back to no subprotocol
+      const first = offered[0];
+      return first || false;
     },
   });
 
+  // Log every upgrade attempt
+  server.on("upgrade", (req, _socket, _head) => {
+    logger.info(
+      {
+        url: req.url,
+        origin: req.headers["origin"],
+        userAgent: req.headers["user-agent"],
+        subprotocol: req.headers["sec-websocket-protocol"],
+        clientIp: req.headers["x-forwarded-for"] || req.socket.remoteAddress,
+      },
+      "[BUNGEE] HTTP upgrade request",
+    );
+  });
+
   wss.on("connection", (ws, req) => handleClient(ws, req, config));
-  wss.on("error", (err) => logger.error({ err }, "WebSocket server error"));
+  wss.on("error", (err) => logger.error({ errMsg: err.message }, "[BUNGEE] WSS error"));
 
   return wss;
 }
