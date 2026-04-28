@@ -10,12 +10,14 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@thi.ng/leb128": "^3.1.85",
     "@workspace/api-zod": "workspace:*",
     "@workspace/db": "workspace:*",
     "cookie-parser": "^1.4.7",
     "cors": "^2",
     "drizzle-orm": "catalog:",
     "express": "^5",
+    "minecraft-protocol": "^1.66.0",
     "net": "^1.0.2",
     "pino": "^9",
     "pino-http": "^10",

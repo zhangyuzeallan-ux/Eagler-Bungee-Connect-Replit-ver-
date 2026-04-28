@@ -1,8 +1,9 @@
-import { WebSocketServer, WebSocket } from "ws";
-import * as net from "net";
 import * as http from "http";
+import * as net from "net";
 import * as crypto from "crypto";
+import { WebSocketServer, WebSocket } from "ws";
 import { logger } from "./lib/logger";
+import { EaglerPlayer } from "./eagler/player";
 
 interface BungeeConfig {
   minecraftHost: string;
@@ -12,6 +13,10 @@ interface BungeeConfig {
   motdLine1: string;
   motdLine2: string;
   maxPlayers: number;
+  protocolVersion: number;
+  eaglerNetworkVersion: number;
+  brand: string;
+  proxyVersion: string;
 }
 
 const DEFAULT_CONFIG: BungeeConfig = {
@@ -22,17 +27,21 @@ const DEFAULT_CONFIG: BungeeConfig = {
   motdLine1: process.env["MOTD_LINE1"] || "§aEaglerCraft Bungee Proxy",
   motdLine2: process.env["MOTD_LINE2"] || "§7Connecting to Aternos server",
   maxPlayers: Number(process.env["MAX_PLAYERS"] || "20"),
+  protocolVersion: Number(process.env["MC_PROTOCOL"] || "47"),
+  eaglerNetworkVersion: Number(process.env["EAGLER_NET_VERSION"] || "3"),
+  brand: process.env["PROXY_BRAND"] || "lax1dude",
+  proxyVersion: process.env["PROXY_VERSION"] || "1.0.0",
 };
 
 const SERVER_UUID = crypto.randomUUID();
-const PROXY_VERSION = "EaglerXBungee/1.3.4";
-const BRAND = "lax1dude";
+
+const activePlayers = new Set<EaglerPlayer>();
 
 function buildBaseResponse(config: BungeeConfig): Record<string, unknown> {
   return {
     name: config.serverName,
-    brand: BRAND,
-    vers: PROXY_VERSION,
+    brand: config.brand,
+    vers: `EaglerXBungee/${config.proxyVersion}`,
     cracked: true,
     secure: false,
     time: Date.now(),
@@ -48,43 +57,94 @@ function buildMotdResponse(
   const motdLines: string[] = [];
   if (config.motdLine1) motdLines.push(config.motdLine1);
   if (config.motdLine2) motdLines.push(config.motdLine2);
-
-  const data = {
-    cache: false,
-    motd: motdLines,
-    icon: false,
-    online,
-    max: config.maxPlayers,
-    players,
-  };
   return JSON.stringify({
     ...buildBaseResponse(config),
     type: "MOTD",
-    data,
+    data: {
+      cache: false,
+      motd: motdLines,
+      icon: false,
+      online,
+      max: config.maxPlayers,
+      players,
+    },
   });
 }
 
 function buildVersionResponse(config: BungeeConfig): string {
-  const data = {
-    minEaglerProtocol: 2,
-    maxEaglerProtocol: 3,
-    minMinecraftProtocol: 47,
-    maxMinecraftProtocol: 47,
-  };
   return JSON.stringify({
     ...buildBaseResponse(config),
     type: "version",
-    data,
+    data: {
+      minEaglerProtocol: 2,
+      maxEaglerProtocol: 3,
+      minMinecraftProtocol: 47,
+      maxMinecraftProtocol: 47,
+    },
   });
 }
 
-// Best-effort Minecraft Server List Ping (SLP) to upstream
-// Uses the modern handshake (state=1) + status request flow.
-async function pingUpstream(
-  host: string,
-  port: number,
-  timeoutMs = 3000,
-): Promise<{ online: number; max: number; players: string[] } | null> {
+// --- Vanilla Minecraft SLP for upstream player count ---
+
+function encodeVarInt(value: number): Buffer {
+  const bytes: number[] = [];
+  let v = value >>> 0;
+  while (true) {
+    if ((v & ~0x7f) === 0) { bytes.push(v); break; }
+    bytes.push((v & 0x7f) | 0x80);
+    v >>>= 7;
+  }
+  return Buffer.from(bytes);
+}
+function encodeMcString(s: string): Buffer {
+  const str = Buffer.from(s, "utf8");
+  return Buffer.concat([encodeVarInt(str.length), str]);
+}
+function encodeUShort(v: number): Buffer {
+  const b = Buffer.alloc(2);
+  b.writeUInt16BE(v, 0);
+  return b;
+}
+function encodeMcPacket(packetId: number, fields: Buffer[]): Buffer {
+  const body = Buffer.concat([encodeVarInt(packetId), ...fields]);
+  return Buffer.concat([encodeVarInt(body.length), body]);
+}
+function readVarIntFromBuf(buf: Buffer, offset: number): { value: number; size: number } | null {
+  let value = 0, size = 0, byte: number;
+  do {
+    if (offset + size >= buf.length) return null;
+    byte = buf[offset + size]!;
+    value |= (byte & 0x7f) << (7 * size);
+    size++;
+    if (size > 5) return null;
+  } while ((byte & 0x80) !== 0);
+  return { value, size };
+}
+function tryParseStatusResponse(buf: Buffer): { online: number; max: number; players: string[] } | null {
+  const lenInfo = readVarIntFromBuf(buf, 0);
+  if (!lenInfo) return null;
+  if (buf.length < lenInfo.size + lenInfo.value) return null;
+  let p = lenInfo.size;
+  const idInfo = readVarIntFromBuf(buf, p);
+  if (!idInfo || idInfo.value !== 0x00) return null;
+  p += idInfo.size;
+  const strLenInfo = readVarIntFromBuf(buf, p);
+  if (!strLenInfo) return null;
+  p += strLenInfo.size;
+  if (buf.length < p + strLenInfo.value) return null;
+  try {
+    const obj = JSON.parse(buf.slice(p, p + strLenInfo.value).toString("utf8")) as {
+      players?: { online?: number; max?: number; sample?: { name?: string }[] };
+    };
+    return {
+      online: obj.players?.online ?? 0,
+      max: obj.players?.max ?? 0,
+      players: (obj.players?.sample ?? []).map((s) => s.name).filter((n): n is string => typeof n === "string"),
+    };
+  } catch { return null; }
+}
+
+async function pingUpstream(host: string, port: number, timeoutMs = 2500): Promise<{ online: number; max: number; players: string[] } | null> {
   return new Promise((resolve) => {
     const sock = net.createConnection({ host, port });
     let settled = false;
@@ -95,271 +155,124 @@ async function pingUpstream(
       resolve(val);
     };
     const timer = setTimeout(() => finish(null), timeoutMs);
-
     sock.on("connect", () => {
-      // Build VarInt-encoded handshake
-      const handshake = encodeMcPacket(0x00, [
-        encodeVarInt(47), // protocol version
-        encodeMcString(host),
-        encodeUShort(port),
-        encodeVarInt(1), // next state = status
-      ]);
-      const statusReq = encodeMcPacket(0x00, []);
-      sock.write(Buffer.concat([handshake, statusReq]));
+      const hs = encodeMcPacket(0x00, [encodeVarInt(47), encodeMcString(host), encodeUShort(port), encodeVarInt(1)]);
+      const sr = encodeMcPacket(0x00, []);
+      sock.write(Buffer.concat([hs, sr]));
     });
-
     let recvBuf = Buffer.alloc(0);
-    sock.on("data", (chunk) => {
-      recvBuf = Buffer.concat([recvBuf, chunk]);
-      // Try to parse status response
+    sock.on("data", (chunk: Buffer | string) => {
+      recvBuf = Buffer.concat([recvBuf, typeof chunk === "string" ? Buffer.from(chunk) : chunk]);
       const parsed = tryParseStatusResponse(recvBuf);
-      if (parsed) {
-        clearTimeout(timer);
-        finish(parsed);
-      }
+      if (parsed) { clearTimeout(timer); finish(parsed); }
     });
     sock.on("error", () => { clearTimeout(timer); finish(null); });
     sock.on("close", () => { clearTimeout(timer); finish(null); });
   });
 }
 
-function encodeVarInt(value: number): Buffer {
-  const bytes: number[] = [];
-  let v = value >>> 0;
-  while (true) {
-    if ((v & ~0x7f) === 0) {
-      bytes.push(v);
-      break;
-    }
-    bytes.push((v & 0x7f) | 0x80);
-    v >>>= 7;
-  }
-  return Buffer.from(bytes);
-}
+// --- WebSocket connection handler ---
 
-function encodeMcString(s: string): Buffer {
-  const str = Buffer.from(s, "utf8");
-  return Buffer.concat([encodeVarInt(str.length), str]);
-}
-
-function encodeUShort(v: number): Buffer {
-  const b = Buffer.alloc(2);
-  b.writeUInt16BE(v, 0);
-  return b;
-}
-
-function encodeMcPacket(packetId: number, fields: Buffer[]): Buffer {
-  const body = Buffer.concat([encodeVarInt(packetId), ...fields]);
-  return Buffer.concat([encodeVarInt(body.length), body]);
-}
-
-function readVarInt(buf: Buffer, offset: number): { value: number; size: number } | null {
-  let value = 0;
-  let size = 0;
-  let byte: number;
-  do {
-    if (offset + size >= buf.length) return null;
-    byte = buf[offset + size]!;
-    value |= (byte & 0x7f) << (7 * size);
-    size++;
-    if (size > 5) return null;
-  } while ((byte & 0x80) !== 0);
-  return { value, size };
-}
-
-function tryParseStatusResponse(
-  buf: Buffer,
-): { online: number; max: number; players: string[] } | null {
-  // Frame: VarInt length, VarInt packetId(=0), VarInt strLen, JSON string
-  const lenInfo = readVarInt(buf, 0);
-  if (!lenInfo) return null;
-  if (buf.length < lenInfo.size + lenInfo.value) return null;
-
-  let p = lenInfo.size;
-  const idInfo = readVarInt(buf, p);
-  if (!idInfo || idInfo.value !== 0x00) return null;
-  p += idInfo.size;
-
-  const strLenInfo = readVarInt(buf, p);
-  if (!strLenInfo) return null;
-  p += strLenInfo.size;
-  if (buf.length < p + strLenInfo.value) return null;
-
-  const json = buf.slice(p, p + strLenInfo.value).toString("utf8");
-  try {
-    const obj = JSON.parse(json) as {
-      players?: { online?: number; max?: number; sample?: { name?: string }[] };
-    };
-    const online = obj.players?.online ?? 0;
-    const max = obj.players?.max ?? 0;
-    const players = (obj.players?.sample ?? [])
-      .map((p) => p.name)
-      .filter((n): n is string => typeof n === "string");
-    return { online, max, players };
-  } catch {
-    return null;
-  }
-}
-
-function handleClient(
-  ws: WebSocket,
-  req: http.IncomingMessage,
-  config: BungeeConfig,
-) {
+async function handleClient(ws: WebSocket, req: http.IncomingMessage, config: BungeeConfig) {
   const clientIp =
-    (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() ||
-    req.socket.remoteAddress ||
-    "unknown";
-  const origin = req.headers["origin"] as string | undefined;
+    ((req.headers["x-forwarded-for"] as string) || "").split(",")[0]?.trim() ||
+    req.socket.remoteAddress || "unknown";
 
   logger.info(
-    { clientIp, origin, url: req.url, subprotocol: ws.protocol || "(none)" },
+    { clientIp, origin: req.headers["origin"], url: req.url },
     "[BUNGEE] Client connected",
   );
 
-  let firstPacketSeen = false;
-  let isQueryConnection = false;
+  // Wait for the very first frame to decide: query (text) or login (binary)
+  let firstMsg: { data: Buffer; isBinary: boolean } | null = null;
+  try {
+    firstMsg = await new Promise<{ data: Buffer; isBinary: boolean }>((resolve, reject) => {
+      const onMsg = (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
+        ws.off("message", onMsg);
+        ws.off("close", onClose);
+        clearTimeout(timer);
+        const buf = Buffer.isBuffer(data) ? data
+          : data instanceof ArrayBuffer ? Buffer.from(data)
+          : Buffer.concat(data as Buffer[]);
+        resolve({ data: buf, isBinary });
+      };
+      const onClose = () => { ws.off("message", onMsg); reject(new Error("client closed before sending data")); };
+      const timer = setTimeout(() => {
+        ws.off("message", onMsg); ws.off("close", onClose);
+        reject(new Error("no first packet within 10s"));
+      }, 10000);
+      ws.on("message", onMsg);
+      ws.on("close", onClose);
+    });
+  } catch (err) {
+    logger.warn({ clientIp, errMsg: err instanceof Error ? err.message : String(err) }, "[BUNGEE] First-packet wait failed");
+    try { ws.close(); } catch { /* ignore */ }
+    return;
+  }
 
-  const silenceTimer = setTimeout(() => {
-    if (!firstPacketSeen) {
-      logger.warn({ clientIp }, "[BUNGEE] Client sent NO data after 5s");
-    }
-  }, 5000);
-
-  ws.on("message", async (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
-    firstPacketSeen = true;
-    clearTimeout(silenceTimer);
-
-    const buf = Buffer.isBuffer(data)
-      ? data
-      : data instanceof ArrayBuffer
-        ? Buffer.from(data)
-        : Buffer.concat(data as Buffer[]);
-
-    // ---------- TEXT FRAME PATH (MOTD / version queries) ----------
-    if (!isBinary) {
-      const str = buf.toString("utf8");
-      logger.info(
-        { clientIp, isBinary, byteLength: buf.length, text: str.slice(0, 120) },
-        "[BUNGEE] WS text frame",
-      );
-
-      const lower = str.toLowerCase();
-      if (lower.startsWith("accept:")) {
-        isQueryConnection = true;
-        const queryType = str.substring(7).trim().toLowerCase();
-        const isMotd = queryType.startsWith("motd");
-        const isVersion = queryType === "version";
-
-        if (isMotd) {
-          // Try to ping the upstream Minecraft server for real player count
-          let upstream: { online: number; max: number; players: string[] } | null = null;
-          if (config.minecraftHost) {
-            upstream = await pingUpstream(config.minecraftHost, config.minecraftPort, 2500);
-          }
-          const online = upstream?.online ?? 0;
-          const players = (upstream?.players ?? []).slice(0, 9);
-          const response = buildMotdResponse(config, online, players);
-          logger.info(
-            { clientIp, queryType, upstreamOk: !!upstream, online, players: players.length },
-            "[BUNGEE] Sending MOTD response",
-          );
-          ws.send(response);
-          // Close shortly after — MOTD queries are one-shot
-          setTimeout(() => {
-            if (ws.readyState === WebSocket.OPEN) ws.close(1000, "motd-done");
-          }, 200);
-          return;
+  // ----- TEXT FRAME: MOTD/version query -----
+  if (!firstMsg.isBinary) {
+    const text = firstMsg.data.toString("utf8");
+    const lower = text.toLowerCase();
+    logger.info({ clientIp, text: text.slice(0, 80) }, "[BUNGEE] Query frame");
+    if (lower.startsWith("accept:")) {
+      const queryType = text.substring(7).trim().toLowerCase();
+      if (queryType.startsWith("motd")) {
+        let upstream: { online: number; max: number; players: string[] } | null = null;
+        if (config.minecraftHost) {
+          upstream = await pingUpstream(config.minecraftHost, config.minecraftPort);
         }
-
-        if (isVersion) {
-          const response = buildVersionResponse(config);
-          logger.info({ clientIp }, "[BUNGEE] Sending version response");
-          ws.send(response);
-          setTimeout(() => {
-            if (ws.readyState === WebSocket.OPEN) ws.close(1000, "version-done");
-          }, 200);
-          return;
-        }
-
-        logger.warn({ clientIp, queryType }, "[BUNGEE] Unsupported query type");
-        ws.send(JSON.stringify({ ...buildBaseResponse(config), type: queryType, data: { unsupported: true } }));
-        ws.close(1000, "unsupported-query");
+        const localOnline = activePlayers.size;
+        const localPlayers = Array.from(activePlayers).map((p) => p.username).filter(Boolean).slice(0, 9);
+        const online = (upstream?.online ?? 0) + localOnline;
+        const players = [...localPlayers, ...(upstream?.players ?? [])].slice(0, 9);
+        ws.send(buildMotdResponse(config, online, players));
+        setTimeout(() => { try { ws.close(1000, "motd-done"); } catch { /* ignore */ } }, 200);
         return;
       }
-
-      // Unknown text command → close
-      logger.warn({ clientIp, text: str.slice(0, 80) }, "[BUNGEE] Unknown text command");
-      ws.close(1003, "unknown-text");
-      return;
+      if (queryType === "version") {
+        ws.send(buildVersionResponse(config));
+        setTimeout(() => { try { ws.close(1000, "version-done"); } catch { /* ignore */ } }, 200);
+        return;
+      }
     }
+    logger.warn({ clientIp, text: text.slice(0, 80) }, "[BUNGEE] Unknown text query");
+    try { ws.close(1003, "unknown-text"); } catch { /* ignore */ }
+    return;
+  }
 
-    // ---------- BINARY FRAME PATH ----------
-    const packetType = buf[0];
-    logger.info(
-      {
-        clientIp,
-        isBinary,
-        byteLength: buf.length,
-        packetType: packetType !== undefined ? `0x${packetType.toString(16).padStart(2, "0")}` : "?",
-        hexPreview: buf.slice(0, 64).toString("hex"),
-      },
-      "[BUNGEE] WS binary frame",
-    );
+  // ----- BINARY FRAME: EaglerX login -----
+  if (!config.minecraftHost) {
+    logger.warn({ clientIp }, "[BUNGEE] Login attempted but MC_HOST is not configured");
+    try { ws.send(Buffer.concat([Buffer.from([0xff, 0x08]), Buffer.from([21]), Buffer.from("Server not configured", "utf8")])); ws.close(); } catch { /* ignore */ }
+    return;
+  }
 
-    // EaglerXBungee binary login handshake (PROTOCOL_CLIENT_VERSION = 0x01)
-    if (packetType === 0x01 && !isQueryConnection) {
-      // The client wants to LOG IN. Our proxy doesn't actually translate
-      // EaglerX login → vanilla Minecraft login (that's a much larger project).
-      // Send a friendly error so the client shows a clear message instead of
-      // "Connection Refused".
-      const errMsg = "Login through this proxy is not yet supported. The server appears in your list, but joining requires an EaglerXBungee plugin installed on the server.";
-      const errBytes = Buffer.from(errMsg, "utf8");
-      // PROTOCOL_SERVER_ERROR (0xFF) + SERVER_ERROR_CUSTOM_MESSAGE (0x08) + uint8 len + msg
-      const truncated = errBytes.slice(0, 255);
-      const out = Buffer.concat([
-        Buffer.from([0xff, 0x08, truncated.length]),
-        truncated,
-      ]);
-      logger.info({ clientIp }, "[BUNGEE] Login attempted — sending unsupported message");
-      ws.send(out);
-      setTimeout(() => {
-        if (ws.readyState === WebSocket.OPEN) ws.close(1000, "login-unsupported");
-      }, 300);
-      return;
-    }
-
-    // Legacy/unknown binary packet — log and close
-    logger.warn(
-      { clientIp, packetType: packetType?.toString(16) },
-      "[BUNGEE] Unrecognized binary packet — closing",
-    );
-    ws.close(1003, "unsupported-binary");
+  const player = new EaglerPlayer({
+    ws, req,
+    upstreamHost: config.minecraftHost,
+    upstreamPort: config.minecraftPort,
+    protocolVersion: config.protocolVersion,
+    eaglerNetworkVersion: config.eaglerNetworkVersion,
+    brand: config.brand,
+    proxyVersion: config.proxyVersion,
   });
-
-  ws.on("close", (code: number, reason: Buffer) => {
-    clearTimeout(silenceTimer);
-    logger.info(
-      { clientIp, code, reason: reason.toString(), receivedAnyData: firstPacketSeen },
-      "[BUNGEE] Client disconnected",
-    );
+  activePlayers.add(player);
+  player.once("disconnect", () => {
+    activePlayers.delete(player);
+    logger.info({ clientIp, username: player.username }, "[BUNGEE] Player removed");
   });
-
-  ws.on("error", (err: Error) => {
-    logger.error({ clientIp, errMsg: err.message }, "[BUNGEE] WS error");
-  });
+  await player.run(firstMsg.data);
 }
 
-function createBungeeProxy(
-  server: http.Server,
-  config: BungeeConfig = DEFAULT_CONFIG,
-): WebSocketServer {
+function createBungeeProxy(server: http.Server, config: BungeeConfig = DEFAULT_CONFIG): WebSocketServer {
   logger.info(
     {
       wsPath: config.wsPath,
       minecraftHost: config.minecraftHost || "(not set)",
       minecraftPort: config.minecraftPort,
       serverName: config.serverName,
+      protocolVersion: config.protocolVersion,
     },
     "EaglerCraft Bungee WebSocket proxy starting",
   );
@@ -369,12 +282,19 @@ function createBungeeProxy(
     path: config.wsPath,
     handleProtocols: (protocols: Set<string>) => {
       const offered = Array.from(protocols);
-      const first = offered[0];
-      return first || false;
+      return offered[0] || false;
     },
   });
 
-  wss.on("connection", (ws, req) => handleClient(ws, req, config));
+  wss.on("connection", (ws, req) => {
+    handleClient(ws, req, config).catch((err) => {
+      logger.error(
+        { errMsg: err instanceof Error ? err.message : String(err) },
+        "[BUNGEE] handleClient threw",
+      );
+      try { ws.close(); } catch { /* ignore */ }
+    });
+  });
   wss.on("error", (err) => logger.error({ errMsg: err.message }, "[BUNGEE] WSS error"));
 
   return wss;

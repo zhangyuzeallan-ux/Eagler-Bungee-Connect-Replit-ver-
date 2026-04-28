@@ -20,6 +20,12 @@ router.get("/bungee/status", (_req, res) => {
       note: mcHost
         ? `Proxy is connected to ${mcHost}:${mcPort}`
         : "Set MC_HOST environment variable to your Aternos server hostname",
+      requirements: [
+        "Aternos server must be ONLINE (started) before connecting",
+        "Aternos server must run Minecraft 1.8.x (vanilla protocol 47)",
+        "Aternos server MUST have online-mode set to false (Server Settings → Online Mode → off)",
+        "Without offline-mode, EaglerCraft players will be kicked with 'Failed to verify username'",
+      ],
     },
   });
 });
