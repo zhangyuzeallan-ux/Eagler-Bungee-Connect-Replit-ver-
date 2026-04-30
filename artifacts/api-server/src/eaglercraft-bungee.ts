@@ -179,7 +179,14 @@ async function handleClient(ws: WebSocket, req: http.IncomingMessage, config: Bu
     req.socket.remoteAddress || "unknown";
 
   logger.info(
-    { clientIp, origin: req.headers["origin"], url: req.url },
+    {
+      clientIp,
+      origin: req.headers["origin"],
+      ua: req.headers["user-agent"],
+      url: req.url,
+      protocol: (ws as unknown as { protocol?: string }).protocol,
+      cookie: req.headers["cookie"] ? "(present)" : "(none)",
+    },
     "[BUNGEE] Client connected",
   );
 
@@ -196,11 +203,15 @@ async function handleClient(ws: WebSocket, req: http.IncomingMessage, config: Bu
           : Buffer.concat(data as Buffer[]);
         resolve({ data: buf, isBinary });
       };
-      const onClose = () => { ws.off("message", onMsg); reject(new Error("client closed before sending data")); };
+      const onClose = (code: number, reason: Buffer) => {
+        ws.off("message", onMsg);
+        clearTimeout(timer);
+        reject(new Error(`client closed before sending data (code=${code} reason=${reason.toString("utf8") || "(empty)"})`));
+      };
       const timer = setTimeout(() => {
         ws.off("message", onMsg); ws.off("close", onClose);
-        reject(new Error("no first packet within 10s"));
-      }, 10000);
+        reject(new Error("no first packet within 30s"));
+      }, 30000);
       ws.on("message", onMsg);
       ws.on("close", onClose);
     });
@@ -209,6 +220,19 @@ async function handleClient(ws: WebSocket, req: http.IncomingMessage, config: Bu
     try { ws.close(); } catch { /* ignore */ }
     return;
   }
+
+  // Always log the first frame in detail so we can diagnose unknown clients
+  logger.info(
+    {
+      clientIp,
+      isBinary: firstMsg.isBinary,
+      length: firstMsg.data.length,
+      firstByte: firstMsg.data.length > 0 ? "0x" + firstMsg.data[0]!.toString(16) : "(empty)",
+      hex: firstMsg.data.subarray(0, 64).toString("hex"),
+      utf8: firstMsg.isBinary ? null : firstMsg.data.toString("utf8").slice(0, 120),
+    },
+    "[BUNGEE] First frame received",
+  );
 
   // ----- TEXT FRAME: MOTD/version query -----
   if (!firstMsg.isBinary) {

@@ -88,7 +88,21 @@ export class EaglerPlayer extends EventEmitter {
 
   private async handshake(firstPacket: Buffer): Promise<void> {
     // Step 1: parse CSLogin
-    const login = parseCSLogin(firstPacket);
+    let login;
+    try {
+      login = parseCSLogin(firstPacket);
+    } catch (err) {
+      logger.warn(
+        {
+          clientIp: this.clientIp,
+          errMsg: err instanceof Error ? err.message : String(err),
+          length: firstPacket.length,
+          hex: firstPacket.subarray(0, 96).toString("hex"),
+        },
+        "[BUNGEE] Failed to parse CSLogin packet",
+      );
+      throw err;
+    }
     logger.info(
       {
         clientIp: this.clientIp,
