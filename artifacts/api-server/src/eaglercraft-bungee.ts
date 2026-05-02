@@ -304,10 +304,6 @@ function createBungeeProxy(server: http.Server, config: BungeeConfig = DEFAULT_C
   const wss = new WebSocketServer({
     server,
     path: config.wsPath,
-    handleProtocols: (protocols: Set<string>) => {
-      const offered = Array.from(protocols);
-      return offered[0] || false;
-    },
   });
 
   wss.on("connection", (ws, req) => {
