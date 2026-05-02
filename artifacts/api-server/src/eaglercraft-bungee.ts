@@ -144,7 +144,7 @@ function tryParseStatusResponse(buf: Buffer): { online: number; max: number; pla
   } catch { return null; }
 }
 
-async function pingUpstream(host: string, port: number, timeoutMs = 2500): Promise<{ online: number; max: number; players: string[] } | null> {
+async function pingUpstream(host: string, port: number, timeoutMs = 800): Promise<{ online: number; max: number; players: string[] } | null> {
   return new Promise((resolve) => {
     const sock = net.createConnection({ host, port });
     let settled = false;

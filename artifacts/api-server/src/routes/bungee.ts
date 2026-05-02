@@ -1,8 +1,33 @@
-import { Router, type IRouter } from "express";
+import { Router, type IRouter, type Request, type Response } from "express";
 
 const router: IRouter = Router();
 
-router.get("/bungee/status", (_req, res) => {
+// EaglerCraft browser client sends HTTP GET to the WebSocket path before attempting
+// the WebSocket upgrade, to verify the server is reachable. Without a 200 response
+// it shows a red X and never tries WebSocket. Return an EaglerXBungee-compatible page.
+router.get("/eagler", (_req: Request, res: Response) => {
+  const wsPath = process.env["WS_PATH"] || "/api/eagler";
+  const serverName = process.env["SERVER_NAME"] || "EaglerCraft Bungee Proxy";
+  const domain = (process.env["REPLIT_DOMAINS"] || "").split(",")[0]?.trim() || "localhost";
+  const wsUrl = `wss://${domain}${wsPath}`;
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.setHeader("X-EaglerCraft-Server", wsUrl);
+  res.status(200).send(`<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${serverName}</title>
+</head>
+<body>
+<h2>${serverName}</h2>
+<p>This is an EaglerCraft WebSocket proxy server.</p>
+<p>Connect using EaglerCraft 1.8.8 with server address: <code>${wsUrl}</code></p>
+</body>
+</html>`);
+});
+
+router.get("/bungee/status", (_req: Request, res: Response) => {
   const mcHost = process.env["MC_HOST"] || "";
   const mcPort = Number(process.env["MC_PORT"] || "25565");
   const wsPath = process.env["WS_PATH"] || "/api/eagler";
