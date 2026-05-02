@@ -251,18 +251,76 @@ async function handleClient(ws: WebSocket, req: http.IncomingMessage, config: Bu
         const online = (upstream?.online ?? 0) + localOnline;
         const players = [...localPlayers, ...(upstream?.players ?? [])].slice(0, 9);
         ws.send(buildMotdResponse(config, online, players));
-        setTimeout(() => { try { ws.close(1000, "motd-done"); } catch { /* ignore */ } }, 200);
-        return;
-      }
-      if (queryType === "version") {
+        logger.info({ clientIp }, "[BUNGEE] MOTD sent, waiting for login on same connection");
+
+        // EaglerCraft browser client reuses the same WS connection:
+        // after MOTD it sends CSLogin binary frame on the same socket.
+        // Wait up to 30 s for the next frame before giving up.
+        let loginMsg: { data: Buffer; isBinary: boolean } | null = null;
+        try {
+          loginMsg = await new Promise<{ data: Buffer; isBinary: boolean }>((resolve, reject) => {
+            const onMsg = (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
+              ws.off("message", onMsg);
+              ws.off("close", onClose);
+              clearTimeout(idleTimer);
+              const buf = Buffer.isBuffer(data) ? data
+                : data instanceof ArrayBuffer ? Buffer.from(data)
+                : Buffer.concat(data as Buffer[]);
+              resolve({ data: buf, isBinary });
+            };
+            const onClose = (code: number) => {
+              ws.off("message", onMsg);
+              clearTimeout(idleTimer);
+              reject(new Error(`closed after motd (code=${code})`));
+            };
+            const idleTimer = setTimeout(() => {
+              ws.off("message", onMsg);
+              ws.off("close", onClose);
+              reject(new Error("idle after motd"));
+            }, 30000);
+            ws.on("message", onMsg);
+            ws.on("close", onClose);
+          });
+        } catch {
+          try { ws.close(1000, "motd-done"); } catch { /* ignore */ }
+          return;
+        }
+
+        if (!loginMsg.isBinary) {
+          logger.warn({ clientIp }, "[BUNGEE] Expected login binary after MOTD, got text");
+          try { ws.close(1003, "expected-binary"); } catch { /* ignore */ }
+          return;
+        }
+
+        logger.info(
+          {
+            clientIp,
+            isBinary: true,
+            length: loginMsg.data.length,
+            firstByte: "0x" + loginMsg.data[0]!.toString(16),
+            hex: loginMsg.data.subarray(0, 64).toString("hex"),
+          },
+          "[BUNGEE] Login frame on same connection",
+        );
+
+        // Fall through to login handler with the captured binary frame
+        firstMsg = loginMsg;
+      } else if (queryType === "version") {
         ws.send(buildVersionResponse(config));
-        setTimeout(() => { try { ws.close(1000, "version-done"); } catch { /* ignore */ } }, 200);
+        try { ws.close(1000, "version-done"); } catch { /* ignore */ }
+        return;
+      } else {
+        logger.warn({ clientIp, text: text.slice(0, 80) }, "[BUNGEE] Unknown query type");
+        try { ws.close(1003, "unknown-query"); } catch { /* ignore */ }
         return;
       }
+    } else {
+      logger.warn({ clientIp, text: text.slice(0, 80) }, "[BUNGEE] Unknown text query");
+      try { ws.close(1003, "unknown-text"); } catch { /* ignore */ }
+      return;
     }
-    logger.warn({ clientIp, text: text.slice(0, 80) }, "[BUNGEE] Unknown text query");
-    try { ws.close(1003, "unknown-text"); } catch { /* ignore */ }
-    return;
+
+    // At this point firstMsg is the binary login frame (same connection after MOTD)
   }
 
   // ----- BINARY FRAME: EaglerX login -----
