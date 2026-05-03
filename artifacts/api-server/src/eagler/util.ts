@@ -20,7 +20,7 @@ export function validateUsername(name: string): void {
 
 export function awaitPacket(
   ws: WebSocket,
-  timeoutMs = 10000,
+  timeoutMs = 15000,
   filter?: (msg: Buffer) => boolean,
 ): Promise<Buffer> {
   return new Promise<Buffer>((resolve, reject) => {

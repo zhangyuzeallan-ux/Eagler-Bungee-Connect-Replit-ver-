@@ -144,7 +144,7 @@ function tryParseStatusResponse(buf: Buffer): { online: number; max: number; pla
   } catch { return null; }
 }
 
-async function pingUpstream(host: string, port: number, timeoutMs = 800): Promise<{ online: number; max: number; players: string[] } | null> {
+async function pingUpstream(host: string, port: number, timeoutMs = 2000): Promise<{ online: number; max: number; players: string[] } | null> {
   return new Promise((resolve) => {
     const sock = net.createConnection({ host, port });
     let settled = false;
@@ -255,7 +255,7 @@ async function handleClient(ws: WebSocket, req: http.IncomingMessage, config: Bu
 
         // EaglerCraft browser client reuses the same WS connection:
         // after MOTD it sends CSLogin binary frame on the same socket.
-        // Wait up to 30 s for the next frame before giving up.
+        // Wait longer here because browsers on Replit can stall briefly after MOTD.
         let loginMsg: { data: Buffer; isBinary: boolean } | null = null;
         try {
           loginMsg = await new Promise<{ data: Buffer; isBinary: boolean }>((resolve, reject) => {
@@ -277,7 +277,7 @@ async function handleClient(ws: WebSocket, req: http.IncomingMessage, config: Bu
               ws.off("message", onMsg);
               ws.off("close", onClose);
               reject(new Error("idle after motd"));
-            }, 30000);
+            }, 45000);
             ws.on("message", onMsg);
             ws.on("close", onClose);
           });

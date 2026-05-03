@@ -45,6 +45,7 @@ export class EaglerPlayer extends EventEmitter {
   private clientDeserializer: ReturnType<typeof createDeserializer>;
   private streamStarted = false;
   private clientIp: string;
+  private keepAliveTimer: NodeJS.Timeout | null = null;
 
   constructor(opts: PlayerOptions) {
     super();
@@ -134,7 +135,7 @@ export class EaglerPlayer extends EventEmitter {
     );
 
     // Step 3: wait for CSUsername (0x04)
-    const usernameBuf = await awaitPacket(this.ws, 10000, (b) => b[0] === PACKET_ID.CSUsername);
+    const usernameBuf = await awaitPacket(this.ws, 15000, (b) => b[0] === PACKET_ID.CSUsername);
     const u = parseCSUsername(usernameBuf);
     if (u.username !== this.username) {
       throw new Error("Username mismatch in handshake");
@@ -146,7 +147,7 @@ export class EaglerPlayer extends EventEmitter {
     // Step 5: wait for CSReady (0x08) AND CSSetSkin (0x07) in any order
     const seen = new Set<number>();
     while (!(seen.has(PACKET_ID.CSReady) && seen.has(PACKET_ID.CSSetSkin))) {
-      const pkt = await awaitPacket(this.ws, 10000, (b) => {
+      const pkt = await awaitPacket(this.ws, 15000, (b) => {
         const id = b[0]!;
         return id === PACKET_ID.CSReady || id === PACKET_ID.CSSetSkin;
       });
@@ -184,8 +185,8 @@ export class EaglerPlayer extends EventEmitter {
 
     const connectPromise = new Promise<void>((resolve, reject) => {
       const connectTimer = setTimeout(() => {
-        if (!resolved) reject(new Error("Upstream connect timeout (30s)"));
-      }, 30000);
+        if (!resolved) reject(new Error("Upstream connect timeout (45s)"));
+      }, 45000);
 
       this.serverConnection!.on("error", (err: Error) => {
         clearTimeout(connectTimer);
@@ -272,8 +273,18 @@ export class EaglerPlayer extends EventEmitter {
       }
     });
 
+    this.keepAliveTimer = setInterval(() => {
+      if (this.ws.readyState === 1) {
+        try { this.ws.ping(); } catch { /* ignore */ }
+      }
+    }, 15000);
+
     this.ws.on("close", () => {
       this.state = "DISCONNECTED";
+      if (this.keepAliveTimer) {
+        clearInterval(this.keepAliveTimer);
+        this.keepAliveTimer = null;
+      }
       try { this.serverConnection?.end(""); } catch { /* ignore */ }
       this.emit("disconnect");
     });
@@ -297,6 +308,10 @@ export class EaglerPlayer extends EventEmitter {
     } catch { /* ignore */ }
     try { this.ws.close(); } catch { /* ignore */ }
     try { this.serverConnection?.end(""); } catch { /* ignore */ }
+    if (this.keepAliveTimer) {
+      clearInterval(this.keepAliveTimer);
+      this.keepAliveTimer = null;
+    }
     this.emit("disconnect");
   }
 }
