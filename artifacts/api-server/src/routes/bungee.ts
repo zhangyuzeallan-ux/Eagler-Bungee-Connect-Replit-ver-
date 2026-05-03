@@ -69,10 +69,8 @@ function doTest() {
   const t0 = Date.now();
   ws.onopen = () => {
     append('ok', 'OPEN ('+((Date.now()-t0))+'ms)  readyState='+ws.readyState);
-    append('info', 'Sending text: hello');
-    ws.send('hello');
-    append('info', 'Sending binary: [0x01 0x02 0x03]');
-    ws.send(new Uint8Array([1,2,3]).buffer);
+    append('info', 'Sending binary: [0x01]');
+    ws.send(new Uint8Array([1]).buffer);
   };
   ws.onmessage = (e) => {
     if (e.data instanceof ArrayBuffer) {
@@ -82,7 +80,7 @@ function doTest() {
       append('ok', 'TEXT msg: '+e.data);
     }
   };
-  ws.onerror = (e) => append('err', 'ERROR event (see browser console for details)');
+  ws.onerror = () => append('err', 'ERROR event');
   ws.onclose = (e) => append(e.wasClean?'ok':'err',
     'CLOSE code='+e.code+' wasClean='+e.wasClean+' reason='+(e.reason||'(none)'));
   setTimeout(()=>{ if(ws.readyState!==3) ws.close(); }, 10000);
