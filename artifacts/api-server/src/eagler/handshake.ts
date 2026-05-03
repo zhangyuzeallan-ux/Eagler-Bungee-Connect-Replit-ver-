@@ -39,6 +39,8 @@ export interface ParsedCSLogin {
 export function parseCSLogin(packet: Buffer): ParsedCSLogin {
   if (packet[0] !== PACKET_ID.CSLogin)
     throw new Error(`Not a CSLogin packet (id=${packet[0]?.toString(16)})`);
+  if (packet.length < 8)
+    throw new Error(`CSLogin packet too short (len=${packet.length})`);
   let p = packet.subarray(2);
   let head = readShort(p);
   // capped at 8 to avoid DoS
@@ -92,6 +94,8 @@ export function buildSCIdentify(opts: BuildSCIdentifyOpts = {}): Buffer {
 export function parseCSUsername(packet: Buffer): { username: string } {
   if (packet[0] !== PACKET_ID.CSUsername)
     throw new Error(`Not a CSUsername packet (id=${packet[0]?.toString(16)})`);
+  if (packet.length < 3)
+    throw new Error(`CSUsername packet too short (len=${packet.length})`);
   const p = packet.subarray(1);
   const u = readString(p);
   return { username: u.value };

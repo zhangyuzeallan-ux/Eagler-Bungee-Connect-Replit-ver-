@@ -135,7 +135,7 @@ export class EaglerPlayer extends EventEmitter {
     );
 
     // Step 3: wait for CSUsername (0x04)
-    const usernameBuf = await awaitPacket(this.ws, 15000, (b) => b[0] === PACKET_ID.CSUsername);
+    const usernameBuf = await awaitPacket(this.ws, 30000, (b) => b[0] === PACKET_ID.CSUsername);
     const u = parseCSUsername(usernameBuf);
     if (u.username !== this.username) {
       throw new Error("Username mismatch in handshake");
@@ -147,7 +147,7 @@ export class EaglerPlayer extends EventEmitter {
     // Step 5: wait for CSReady (0x08) AND CSSetSkin (0x07) in any order
     const seen = new Set<number>();
     while (!(seen.has(PACKET_ID.CSReady) && seen.has(PACKET_ID.CSSetSkin))) {
-      const pkt = await awaitPacket(this.ws, 15000, (b) => {
+      const pkt = await awaitPacket(this.ws, 30000, (b) => {
         const id = b[0]!;
         return id === PACKET_ID.CSReady || id === PACKET_ID.CSSetSkin;
       });

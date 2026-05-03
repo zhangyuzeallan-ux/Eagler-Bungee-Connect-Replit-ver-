@@ -210,8 +210,8 @@ async function handleClient(ws: WebSocket, req: http.IncomingMessage, config: Bu
       };
       const timer = setTimeout(() => {
         ws.off("message", onMsg); ws.off("close", onClose);
-        reject(new Error("no first packet within 30s"));
-      }, 30000);
+        reject(new Error("no first packet within 60s"));
+      }, 60000);
       ws.on("message", onMsg);
       ws.on("close", onClose);
     });
@@ -277,7 +277,7 @@ async function handleClient(ws: WebSocket, req: http.IncomingMessage, config: Bu
               ws.off("message", onMsg);
               ws.off("close", onClose);
               reject(new Error("idle after motd"));
-            }, 45000);
+            }, 60000);
             ws.on("message", onMsg);
             ws.on("close", onClose);
           });

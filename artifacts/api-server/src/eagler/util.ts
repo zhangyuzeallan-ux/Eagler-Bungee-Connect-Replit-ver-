@@ -35,6 +35,7 @@ export function awaitPacket(
         : msg instanceof ArrayBuffer
           ? Buffer.from(msg)
           : Buffer.concat(msg as Buffer[]);
+      if (buf.length === 0) return;
       if (filter && !filter(buf)) return;
       cleanup();
       resolve(buf);
