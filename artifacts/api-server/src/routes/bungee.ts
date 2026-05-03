@@ -69,16 +69,11 @@ function doTest() {
   const t0 = Date.now();
   ws.onopen = () => {
     append('ok', 'OPEN ('+((Date.now()-t0))+'ms)  readyState='+ws.readyState);
-    append('info', 'Sending binary: [0x01]');
-    ws.send(new Uint8Array([1]).buffer);
+    append('info', 'Sending text: ping');
+    ws.send('ping');
   };
   ws.onmessage = (e) => {
-    if (e.data instanceof ArrayBuffer) {
-      const arr = new Uint8Array(e.data);
-      append('ok', 'BINARY msg len='+arr.length+' hex='+Array.from(arr).map(x=>x.toString(16).padStart(2,'0')).join(''));
-    } else {
-      append('ok', 'TEXT msg: '+e.data);
-    }
+    append('ok', (e.data instanceof ArrayBuffer ? 'BINARY' : 'TEXT') + ' msg: ' + (e.data instanceof ArrayBuffer ? ('len='+(new Uint8Array(e.data)).length) : e.data));
   };
   ws.onerror = () => append('err', 'ERROR event');
   ws.onclose = (e) => append(e.wasClean?'ok':'err',
