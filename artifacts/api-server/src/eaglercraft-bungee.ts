@@ -190,17 +190,30 @@ async function handleClient(ws: WebSocket, req: http.IncomingMessage, config: Bu
     "[BUNGEE] Client connected",
   );
 
-  // Wait for the very first frame to decide: query (text) or login (binary)
+  // Wait for the first meaningful frame; ignore empty frames and tolerate delayed login payloads.
   let firstMsg: { data: Buffer; isBinary: boolean } | null = null;
   try {
     firstMsg = await new Promise<{ data: Buffer; isBinary: boolean }>((resolve, reject) => {
       const onMsg = (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
-        ws.off("message", onMsg);
-        ws.off("close", onClose);
-        clearTimeout(timer);
         const buf = Buffer.isBuffer(data) ? data
           : data instanceof ArrayBuffer ? Buffer.from(data)
           : Buffer.concat(data as Buffer[]);
+        if (buf.length === 0) return;
+        if (!isBinary) {
+          const text = buf.toString("utf8");
+          const lower = text.toLowerCase();
+          if (lower.startsWith("accept:")) {
+            ws.off("message", onMsg);
+            ws.off("close", onClose);
+            clearTimeout(timer);
+            resolve({ data: buf, isBinary });
+            return;
+          }
+          return;
+        }
+        ws.off("message", onMsg);
+        ws.off("close", onClose);
+        clearTimeout(timer);
         resolve({ data: buf, isBinary });
       };
       const onClose = (code: number, reason: Buffer) => {
@@ -210,7 +223,7 @@ async function handleClient(ws: WebSocket, req: http.IncomingMessage, config: Bu
       };
       const timer = setTimeout(() => {
         ws.off("message", onMsg); ws.off("close", onClose);
-        reject(new Error("no first packet within 60s"));
+        reject(new Error("no login frame within 90s"));
       }, 60000);
       ws.on("message", onMsg);
       ws.on("close", onClose);
@@ -260,12 +273,14 @@ async function handleClient(ws: WebSocket, req: http.IncomingMessage, config: Bu
         try {
           loginMsg = await new Promise<{ data: Buffer; isBinary: boolean }>((resolve, reject) => {
             const onMsg = (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
-              ws.off("message", onMsg);
-              ws.off("close", onClose);
-              clearTimeout(idleTimer);
               const buf = Buffer.isBuffer(data) ? data
                 : data instanceof ArrayBuffer ? Buffer.from(data)
                 : Buffer.concat(data as Buffer[]);
+              if (buf.length === 0) return;
+              if (!isBinary) return;
+              ws.off("message", onMsg);
+              ws.off("close", onClose);
+              clearTimeout(idleTimer);
               resolve({ data: buf, isBinary });
             };
             const onClose = (code: number) => {
