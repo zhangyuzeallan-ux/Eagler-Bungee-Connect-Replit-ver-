@@ -4,6 +4,7 @@ import * as crypto from "crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import { logger } from "./lib/logger";
 import { EaglerPlayer } from "./eagler/player";
+import { isLikelyEaglerLoginFrame } from "./eagler/util";
 
 interface BungeeConfig {
   minecraftHost: string;
@@ -211,6 +212,7 @@ async function handleClient(ws: WebSocket, req: http.IncomingMessage, config: Bu
           }
           return;
         }
+        if (!isLikelyEaglerLoginFrame(buf)) return;
         ws.off("message", onMsg);
         ws.off("close", onClose);
         clearTimeout(timer);
@@ -224,7 +226,7 @@ async function handleClient(ws: WebSocket, req: http.IncomingMessage, config: Bu
       const timer = setTimeout(() => {
         ws.off("message", onMsg); ws.off("close", onClose);
         reject(new Error("no login frame within 90s"));
-      }, 60000);
+      }, 90000);
       ws.on("message", onMsg);
       ws.on("close", onClose);
     });
@@ -277,7 +279,7 @@ async function handleClient(ws: WebSocket, req: http.IncomingMessage, config: Bu
                 : data instanceof ArrayBuffer ? Buffer.from(data)
                 : Buffer.concat(data as Buffer[]);
               if (buf.length === 0) return;
-              if (!isBinary) return;
+              if (!isBinary || !isLikelyEaglerLoginFrame(buf)) return;
               ws.off("message", onMsg);
               ws.off("close", onClose);
               clearTimeout(idleTimer);
@@ -292,7 +294,7 @@ async function handleClient(ws: WebSocket, req: http.IncomingMessage, config: Bu
               ws.off("message", onMsg);
               ws.off("close", onClose);
               reject(new Error("idle after motd"));
-            }, 60000);
+            }, 90000);
             ws.on("message", onMsg);
             ws.on("close", onClose);
           });
