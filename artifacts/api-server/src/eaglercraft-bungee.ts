@@ -381,7 +381,15 @@ function createBungeeProxy(server: http.Server, config: BungeeConfig = DEFAULT_C
   echoWss.on("connection", (ws, req) => {
     const ip = (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim()
       ?? req.socket.remoteAddress ?? "unknown";
-    logger.info({ ip }, "[ECHO] Browser WebSocket connected ✓");
+    logger.info(
+      {
+        ip,
+        url: req.url,
+        origin: req.headers["origin"],
+        secWebSocketProtocol: req.headers["sec-websocket-protocol"],
+      },
+      "[ECHO] Browser WebSocket connected ✓",
+    );
     ws.on("message", (data, isBinary) => {
       const buf = Buffer.isBuffer(data)
         ? data
@@ -399,8 +407,8 @@ function createBungeeProxy(server: http.Server, config: BungeeConfig = DEFAULT_C
       );
       ws.send(buf, { binary: isBinary });
     });
-    ws.on("close", (code) => logger.info({ ip, code }, "[ECHO] closed"));
-    ws.on("error", (err) => logger.warn({ ip, errMsg: err.message }, "[ECHO] error"));
+    ws.on("close", (code, reason) => logger.info({ ip, code, reason: reason.toString("utf8") }, "[ECHO] closed"));
+    ws.on("error", (err) => logger.warn({ ip, errMsg: err.message, stack: err.stack }, "[ECHO] error"));
   });
   echoWss.on("error", (err) => logger.error({ errMsg: err.message }, "[ECHO] WSS error"));
 
