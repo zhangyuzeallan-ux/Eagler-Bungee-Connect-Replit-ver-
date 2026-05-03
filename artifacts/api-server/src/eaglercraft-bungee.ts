@@ -359,25 +359,17 @@ function createBungeeProxy(server: http.Server, config: BungeeConfig = DEFAULT_C
     "EaglerCraft Bungee WebSocket proxy starting",
   );
 
-  // Log ALL raw HTTP upgrade events so we can see if browsers reach the server
-  server.on("upgrade", (req, _socket, _head) => {
-    const ip = (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim()
-      ?? (_socket as unknown as { remoteAddress?: string }).remoteAddress ?? "unknown";
-    logger.info(
-      {
-        method: req.method,
-        url: req.url,
-        upgrade: req.headers["upgrade"],
-        origin: req.headers["origin"],
-        proto: req.headers["x-forwarded-proto"],
-        ip,
-      },
-      "[BUNGEE] Raw HTTP upgrade event",
-    );
-  });
+  // Use noServer:true for ALL WebSocketServers so each one does NOT register its own
+  // 'upgrade' listener. Multiple { server, path } WebSocketServers on the same HTTP server
+  // cause every non-matching server to call abortHandshake(socket, 400), writing HTTP 400
+  // bytes into the already-upgraded WebSocket stream → RSV1 corruption / 1006 disconnect.
+  //
+  // Instead, we register a single 'upgrade' handler and route manually via handleUpgrade().
+  //
+  // perMessageDeflate MUST be disabled: compressed frames set RSV1 which nginx/h2 bridges
+  // cannot relay (browser gets OPEN but 1006 on first frame).
 
-  // Simple echo WebSocket server for connectivity diagnostics (/api/ws-echo)
-  const echoWss = new WebSocketServer({ server, path: "/api/ws-echo" });
+  const echoWss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
   echoWss.on("connection", (ws, req) => {
     const ip = (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim()
       ?? req.socket.remoteAddress ?? "unknown";
@@ -412,11 +404,7 @@ function createBungeeProxy(server: http.Server, config: BungeeConfig = DEFAULT_C
   });
   echoWss.on("error", (err) => logger.error({ errMsg: err.message }, "[ECHO] WSS error"));
 
-  const wss = new WebSocketServer({
-    server,
-    path: config.wsPath,
-  });
-
+  const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
   wss.on("connection", (ws, req) => {
     handleClient(ws, req, config).catch((err) => {
       logger.error(
@@ -427,6 +415,40 @@ function createBungeeProxy(server: http.Server, config: BungeeConfig = DEFAULT_C
     });
   });
   wss.on("error", (err) => logger.error({ errMsg: err.message }, "[BUNGEE] WSS error"));
+
+  // Single upgrade router — only ONE handler touches the socket per request.
+  server.on("upgrade", (req, socket, head) => {
+    const url = req.url ?? "";
+    const pathname = url.split("?")[0] ?? "";
+
+    const ip = (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim()
+      ?? (socket as unknown as { remoteAddress?: string }).remoteAddress ?? "unknown";
+
+    logger.info(
+      {
+        method: req.method,
+        url,
+        upgrade: req.headers["upgrade"],
+        origin: req.headers["origin"],
+        proto: req.headers["x-forwarded-proto"],
+        ip,
+      },
+      "[BUNGEE] Raw HTTP upgrade event",
+    );
+
+    if (pathname === "/api/ws-echo") {
+      echoWss.handleUpgrade(req, socket, head, (ws) => {
+        echoWss.emit("connection", ws, req);
+      });
+    } else if (pathname === config.wsPath) {
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        wss.emit("connection", ws, req);
+      });
+    } else {
+      logger.warn({ pathname, ip }, "[BUNGEE] Unknown upgrade path, destroying socket");
+      socket.destroy();
+    }
+  });
 
   return wss;
 }

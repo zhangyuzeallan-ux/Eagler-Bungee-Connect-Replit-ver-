@@ -58,7 +58,12 @@ export default function App() {
 
     const host = window.location.host;
     const proto = window.location.protocol === "https:" ? "wss" : "ws";
-    setWssUrl(`${proto}://${host}/eagler`);
+    fetch(`${base}/api/bungee/status`)
+      .then((r) => r.json())
+      .then((data: BungeeStatus) => {
+        setWssUrl(`${proto}://${host}${data.proxy.wsPath}`);
+      })
+      .catch(() => setWssUrl(`${proto}://${host}/api/eagler`));
   }, []);
 
   return (
