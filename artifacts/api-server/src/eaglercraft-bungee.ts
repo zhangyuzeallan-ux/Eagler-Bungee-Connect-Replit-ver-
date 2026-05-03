@@ -383,8 +383,21 @@ function createBungeeProxy(server: http.Server, config: BungeeConfig = DEFAULT_C
       ?? req.socket.remoteAddress ?? "unknown";
     logger.info({ ip }, "[ECHO] Browser WebSocket connected ✓");
     ws.on("message", (data, isBinary) => {
-      logger.info({ ip, isBinary, len: (data as Buffer).length }, "[ECHO] message received, echoing back");
-      ws.send(data, { binary: isBinary });
+      const buf = Buffer.isBuffer(data)
+        ? data
+        : data instanceof ArrayBuffer
+          ? Buffer.from(data)
+          : Buffer.concat(data as Buffer[]);
+      logger.info(
+        {
+          ip,
+          isBinary,
+          len: buf.length,
+          hex: buf.subarray(0, 32).toString("hex"),
+        },
+        "[ECHO] message received, echoing back",
+      );
+      ws.send(buf, { binary: isBinary });
     });
     ws.on("close", (code) => logger.info({ ip, code }, "[ECHO] closed"));
     ws.on("error", (err) => logger.warn({ ip, errMsg: err.message }, "[ECHO] error"));
