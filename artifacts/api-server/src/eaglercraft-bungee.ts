@@ -4,7 +4,6 @@ import * as crypto from "crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import { logger } from "./lib/logger";
 import { EaglerPlayer } from "./eagler/player";
-import { isLikelyEaglerLoginFrame } from "./eagler/util";
 
 interface BungeeConfig {
   minecraftHost: string;
@@ -212,7 +211,6 @@ async function handleClient(ws: WebSocket, req: http.IncomingMessage, config: Bu
           }
           return;
         }
-        if (!isLikelyEaglerLoginFrame(buf)) return;
         ws.off("message", onMsg);
         ws.off("close", onClose);
         clearTimeout(timer);
@@ -279,7 +277,7 @@ async function handleClient(ws: WebSocket, req: http.IncomingMessage, config: Bu
                 : data instanceof ArrayBuffer ? Buffer.from(data)
                 : Buffer.concat(data as Buffer[]);
               if (buf.length === 0) return;
-              if (!isBinary || !isLikelyEaglerLoginFrame(buf)) return;
+              if (!isBinary) return;
               ws.off("message", onMsg);
               ws.off("close", onClose);
               clearTimeout(idleTimer);

@@ -53,6 +53,3 @@ export function awaitPacket(
   });
 }
 
-export function isLikelyEaglerLoginFrame(buf: Buffer): boolean {
-  return buf.length > 0 && buf[0] === 0x01;
-}
