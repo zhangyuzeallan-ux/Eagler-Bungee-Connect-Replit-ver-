@@ -92,6 +92,10 @@ function doTest() {
 </html>`);
 });
 
+router.get("/ws-test/.well-known", (_req: Request, res: Response) => {
+  res.json({ ok: true });
+});
+
 router.get("/bungee/status", (_req: Request, res: Response) => {
   const mcHost = process.env["MC_HOST"] || "";
   const mcPort = Number(process.env["MC_PORT"] || "25565");
