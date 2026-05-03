@@ -359,6 +359,38 @@ function createBungeeProxy(server: http.Server, config: BungeeConfig = DEFAULT_C
     "EaglerCraft Bungee WebSocket proxy starting",
   );
 
+  // Log ALL raw HTTP upgrade events so we can see if browsers reach the server
+  server.on("upgrade", (req, _socket, _head) => {
+    const ip = (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim()
+      ?? (_socket as unknown as { remoteAddress?: string }).remoteAddress ?? "unknown";
+    logger.info(
+      {
+        method: req.method,
+        url: req.url,
+        upgrade: req.headers["upgrade"],
+        origin: req.headers["origin"],
+        proto: req.headers["x-forwarded-proto"],
+        ip,
+      },
+      "[BUNGEE] Raw HTTP upgrade event",
+    );
+  });
+
+  // Simple echo WebSocket server for connectivity diagnostics (/api/ws-echo)
+  const echoWss = new WebSocketServer({ server, path: "/api/ws-echo" });
+  echoWss.on("connection", (ws, req) => {
+    const ip = (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim()
+      ?? req.socket.remoteAddress ?? "unknown";
+    logger.info({ ip }, "[ECHO] Browser WebSocket connected ✓");
+    ws.on("message", (data, isBinary) => {
+      logger.info({ ip, isBinary, len: (data as Buffer).length }, "[ECHO] message received, echoing back");
+      ws.send(data, { binary: isBinary });
+    });
+    ws.on("close", (code) => logger.info({ ip, code }, "[ECHO] closed"));
+    ws.on("error", (err) => logger.warn({ ip, errMsg: err.message }, "[ECHO] error"));
+  });
+  echoWss.on("error", (err) => logger.error({ errMsg: err.message }, "[ECHO] WSS error"));
+
   const wss = new WebSocketServer({
     server,
     path: config.wsPath,
